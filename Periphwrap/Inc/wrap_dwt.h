@@ -14,6 +14,10 @@
 #ifndef _BSP_DWT_H
 #define _BSP_DWT_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "main.h"
 #include "stdint.h"
 
@@ -83,5 +87,9 @@ void DWT_Delay(float Delay);
  * @attention 如果长时间不调用timeline函数,则需要手动调用该函数更新时间轴,否则CYCCNT溢出后定时和时间轴不准确
  */
 void DWT_SysTimeUpdate(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* BSP_DWT_H_ */

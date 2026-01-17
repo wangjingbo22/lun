@@ -25,6 +25,8 @@
 /* C++ includes that need C++ linkage */
 #include "middleware_can.hpp"
 #include "motor.hpp"
+#include "detect.hpp"
+extern xTaskHandle MainHandle;
 
 #ifdef __cplusplus
 extern "C" {
@@ -92,6 +94,7 @@ void StartLegTask(void const * argument);
 void test(void *pvParameters);
 void MotorTask(void * argument);
 void setmotor(void * argument);
+
 
 extern void MX_USB_DEVICE_Init(void);
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
@@ -164,11 +167,12 @@ void MX_FREERTOS_Init(void) {
   /* add threads, ... */
   // 增加堆栈大小到 512 words (2KB)，防止 sprintf 和浮点运算导致栈溢出 HardFault
   xTaskCreate(test, "TestTask", 512, NULL, osPriorityNormal, &TestHandle);
-  xTaskCreate(MotorTask, "MotorTask", 512, NULL, osPriorityNormal, NULL);
+  xTaskCreate(MotorTask, "MotorTask", 512, NULL, osPriorityNormal, &MainHandle);
   xTaskCreate(setmotor, "settest", 256, NULL, osPriorityNormal, NULL);
   //这个任务就是在IMU_QuaternionEKF_Update(BMI088.Gyro[0], BMI088.Gyro[1], BMI088.Gyro[2], BMI088.Accel[0], BMI088.Accel[1], BMI088.Accel[2], dt);
   //的基础上减去了重力加速度的影响，得到纯粹的运动加速度
   xTaskCreate(INS_Task, "INSTask", 512, NULL, osPriorityNormal, NULL);
+  xTaskCreate(detect_task, "detect_task", 512, NULL, osPriorityNormal, NULL);
   /* USER CODE END RTOS_THREADS */
 
 }
@@ -424,6 +428,7 @@ void setmotor(void * argument)
     osDelay(10);
   }
 }
+
 
 
 /* USER CODE END Application */

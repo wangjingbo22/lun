@@ -66,6 +66,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     app/Src/robot.cpp
     app/matlab/lqr.c
     app/Src/velocity_kalman.c
+    app/Src/detect.cc
 
     
 )

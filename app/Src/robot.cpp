@@ -2,14 +2,18 @@
 #include "lqr.h"
 #include "motor.hpp"
 #include "pid.h"
+#include "portmacro.h"
 #include "vmc.h"
 #include <math.h>
 #include <stdexcept>
+#include "task.h"
 
 // 轮子半径 (根据你的实际轮子调整, 单位: 米)
 #define WHEEL_RADIUS 0.044f
 
+TaskHandle_t MainHandle;
 
+//u是控制输入，f是腿部作用力
 u u_left,u_right;
 f f_left,f_right;
 
@@ -44,9 +48,42 @@ PID Roll = {2.0f, 0.0f, 0.3f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.5f, 0.02f, 0.3f};
 // 速度卡尔曼滤波器
 VelocityKF_t velocityKF;
 
+// 定义机器人状态枚举
+enum RobotJumpState {
+    STATE_NORMAL = 0,     // 正常平衡
+    STATE_JUMP_SQUAT,     // 1. 蓄力下蹲 (新增)
+    STATE_JUMP_PUSH,      // 2. 爆发蹬地
+    STATE_AIR_RETRACT,    // 3. 空中缩腿
+    STATE_LANDING_RECOVERY // 4. 着地缓冲 (暂未特殊处理，自动回Normal)
+};
+
+// 当前状态
+static volatile RobotJumpState current_state = STATE_NORMAL;
+
 //加上腿长的变化
 void robot::updateState()
 {
+    // === 接收任务通知 (非阻塞) ===
+    uint32_t ulNotificationValue;
+    if (xTaskNotifyWait(0, 0xFFFFFFFF, &ulNotificationValue, 0) == pdTRUE) 
+    {
+        if (ulNotificationValue & 0x02) { // 收到跳跃命令
+             // 收到命令先进入下蹲蓄力状态，而不是直接蹬地
+             current_state = STATE_JUMP_SQUAT;
+        }
+        if (ulNotificationValue & 0x04) { // 检测到离地
+             // 只有在"蹬地"阶段检测到离地才算真离地
+             // 如果在下蹲时检测到离地(因为腿主动收缩导致力变小)，那是误判，忽略之
+             if(current_state == STATE_JUMP_PUSH) {
+                 current_state = STATE_AIR_RETRACT;
+             }
+        }
+        if (ulNotificationValue & 0x08) { // 检测到着地
+             current_state = STATE_NORMAL; 
+        }
+    }
+    // ===========================
+
     //更新左右腿位置
     LegState_l = GetState(motor_[1].angle, motor_[0].angle);
     LegState_r = GetState(motor_[4].angle, motor_[3].angle);
@@ -215,29 +252,83 @@ R标正对是前方，向上pitch增大，向右倾roll增大，所以向右倾�
  */
 void robot::leglengthcontrol()
 {
-    float LEG_L0 = 0.1f; 
+    // ============================================================
+    // 逻辑分支：根据当前状态选择不同的控制策略
+    // ============================================================
+    
+    if (current_state != STATE_NORMAL) 
+    {
+        // >>>>> 跳跃模式逻辑 (接收到 0x02 通知后进入) <<<<<
+
+        // 1. 下蹲蓄力阶段 (Squat)
+        if (current_state == STATE_JUMP_SQUAT)
+        {
+            float Target_Squat_L = 0.065f; // 下蹲目标：蹲到 0.065m
+            float Ks = 300.0f; 
+            float Kd = 8.0f;
+            
+            // 使用PID控制下蹲
+            f_left.F  = Ks * (Target_Squat_L - LegState_l.L) - Kd * legVleft.vL;
+            f_right.F = Ks * (Target_Squat_L - LegState_r.L) - Kd * legVright.vL;
+
+            // 检查：是否已经蹲到位了？
+            // 如果腿长小于 0.07m，说明已经蹲下去了，立即切换到蹬地状态
+            if (LegState_l.L < 0.07f && LegState_r.L < 0.07f)
+            {
+                current_state = STATE_JUMP_PUSH;
+            }
+        }
+        // 2. 爆发蹬地阶段 (Push)
+        else if (current_state == STATE_JUMP_PUSH) 
+        {
+            // 开环给定最大推力，无视PID
+            f_left.F = 180.0f; 
+            f_right.F = 180.0f;
+        }
+        // 3. 空中收腿阶段 (Air)
+        else if (current_state == STATE_AIR_RETRACT)
+        {
+            // 闭环位置控制缩腿
+            // 目标设为 0.08m (比正常短)，防止脚尖磕地，也为落地缓冲留出行程
+            float Target_L = 0.08f; 
+            float Ks = 200.0f; // 空中不需要太硬
+            float Kd = 6.0f;   // 适当阻尼
+            
+            f_left.F  = Ks * (Target_L - LegState_l.L) - Kd * legVleft.vL;
+            f_right.F = Ks * (Target_L - LegState_r.L) - Kd * legVright.vL;
+        }
+    }
+    else 
+    {
+        // >>>>> 正常平衡逻辑 (默认) <<<<<
+        
+        float LEG_L0 = 0.1f; 
+        
         // 1. 物理参数
-    // 刚度要大！200可能偏软，建议 300~500
-    float Ks = 300.0f; 
-    float Kd = 12.0f;
-    float FeedForward = 8.0f; // 必须加！
+        float Ks = 300.0f; 
+        float Kd = 12.0f;
+        float FeedForward = 8.0f; 
 
-    // 2. 计算误差
-    float err_L = LEG_L0 - LegState_l.L;
-    float err_R = LEG_L0 - LegState_r.L;
+        // 2. 计算误差
+        float err_L = LEG_L0 - LegState_l.L;
+        float err_R = LEG_L0 - LegState_r.L;
 
-    // 3. 计算垂直力 Fy (牛顿)
-    f_left.F  = Ks * err_L - Kd * legVleft.vL + FeedForward;
-    f_right.F = Ks * err_R - Kd * legVright.vL + FeedForward;
+        // 3. 计算垂直力 Fy (牛顿)
+        f_left.F  = Ks * err_L - Kd * legVleft.vL + FeedForward;
+        f_right.F = Ks * err_R - Kd * legVright.vL + FeedForward;
+    }
 
-    // 4. 限幅 (保护电机)
-    // 上限要给够，不然撑不起来
-    float F_MAX = 80.0f; 
+    // ============================================================
+    // 统一安全限幅 (无论什么模式都必须遵守物理极限)
+    // ============================================================
+    float F_MAX = 200.0f; 
+    
     if (f_left.F > F_MAX) f_left.F = F_MAX;
     if (f_left.F < 0.0f)  f_left.F = 0.0f; // 防止吸地
 
     if (f_right.F > F_MAX) f_right.F = F_MAX;
     if (f_right.F < 0.0f)  f_right.F = 0.0f;
+
 
     //固定模式
     // PID_SingleCalc(&leglengthleft,0.1f,LegState_l.L);
@@ -270,10 +361,6 @@ void robot::leglengthcontrol()
 
     // f_left.F = leglengthleft.output + Roll.output;
     // f_right.F = leglengthright.output - Roll.output;
-
-
-    //跳跃模式，感觉有点复杂，先不写了
-    
 }
 
 

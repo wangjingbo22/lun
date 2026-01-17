@@ -11,11 +11,13 @@
 #include "Dbus.h"
 #include "math.h"
 #include "velocity_kalman.h"
+#include "FreeRTOS.h"
+#include "task.h"
 
 
 // #define M_PI_2 1.57079632679489661923f
 
-
+extern TaskHandle_t MainHandle;
 
 typedef struct
 {
