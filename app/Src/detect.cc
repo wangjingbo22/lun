@@ -17,7 +17,7 @@ std::atomic<bool> start_flag{false};
 static std::atomic<uint32_t> jump_cmd_t1_ms{0};
 static constexpr uint32_t kJumpDetectWindowMs = 200;
 
-void gound_detect(void* argument)
+void ground_detect(void* argument)
 {
     if(!start_flag.load())
         return;
@@ -87,7 +87,7 @@ void detect_task(void* argument)
 {
   for(;;)
   {
-    gound_detect(argument);
+    ground_detect(argument);
     banlance_detect(argument);
     cmd_detect(argument);
     osDelay(1); //1kHz检测频率

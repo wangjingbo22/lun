@@ -87,7 +87,7 @@ f f_left,f_right;
 
 LegTorque uleft,uright;
 
-robostate x,dx,design,err;
+robostate x,dx,design,err;//四个状态
 
 LegVelocity legVleft,legVright;
 

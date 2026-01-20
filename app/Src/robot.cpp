@@ -105,6 +105,7 @@ void robot::updateState()
     float pos_boost = 25.0f; // 放大25倍: 0.2 * 25 = 5.0. 1m误差 -> 5.0 * 0.2(lqr) = 1.0Nm
     float vel_boost = 12.0f;  // 放大8倍: 0.3 * 8 = 2.4. 1m/s -> 2.4 * 0.2 = 0.48Nm
     
+    //hmx--为何是不是k_.kw_phi * err.phi +，下方Tp_common同样
     float T_common = (k_.kw_theta * err.phi + 
                       k_.kw_gyro * err.dphi + 
                       k_.kw_v * err.dx * vel_boost + 
@@ -248,6 +249,7 @@ void robot::leglengthcontrol()
         float err_R = LEG_L0 - LegState_r.L;
 
         // 3. 计算垂直力 Fy (牛顿)
+        //hmx--做个补偿，抵消稳定的误差，8应该是实测出来的合适的值？如果无法平衡是否是这个值不对
         f_left.F  = Ks * err_L - Kd * legVleft.vL + FeedForward;
         f_right.F = Ks * err_R - Kd * legVright.vL + FeedForward;
     }
@@ -308,7 +310,7 @@ float* robot::DSP_LQR_Calculation(void)
     float32_t U_data[2];
 
     // -----------------------------------------------------------
-    // 2. 填充 K 矩阵 (Row-Major Order)
+    // 2. 填充 K 矩阵 (Row-Major Order)，增益矩阵 K
     // -----------------------------------------------------------
     // Row 0: 轮子电机反馈增益 (Wheel Motor Gains)
     K_data[0] = k_.kw_theta;
@@ -376,19 +378,19 @@ float* robot::DSP_LQR_Calculation(void)
  
 void robot::update()
 {
-    //更新左右腿位置
+    //更新左右腿位置，输入是电机角度，输出是腿长和腿摆动角度
     LegState_l = GetState(motor_[1].angle, motor_[0].angle);
     LegState_r = GetState(motor_[4].angle, motor_[3].angle);
-    //更新左右腿速度
+    //更新左右腿速度，输入是电机角度和电机速度，输出是腿长变化速度和腿摆动角速度
     legVleft = GetVelocity(motor_[1].angle, motor_[0].angle, motor_[1].speed, motor_[0].speed);
     legVright = GetVelocity(motor_[4].angle, motor_[3].angle, motor_[4].speed, motor_[3].speed);
 
-    //更新反馈矩阵K
+    //更新反馈矩阵K，根据当前腿长L调整
 
     k_ = Get_LQR_Dual_K((LegState_l.L+LegState_r.L)/2.0f);
 
     //================== 卡尔曼滤波融合速度 ==================//
-    // 1. 获取编码器速度 (轮子角速度 * 轮子半径 = 线速度)
+    // 1. 获取编码器速度 (轮子角速度 * 轮子半径 = 线速度)，WHEEL_RADIUS是轮子半径
     //float encoder_velocity = (motor_[2].speed + motor_[5].speed) / 2.0f * WHEEL_RADIUS;
 
     // 2. 获取IMU加速度 (使用去除重力后的运动加速度, 取X轴前进方向)
@@ -407,8 +409,10 @@ void robot::update()
     x.x = (motor_[2].angle + motor_[5].angle) / 2.0f * WHEEL_RADIUS;  // 位移也换算为米
     // 使用卡尔曼滤波后的速度
     x.dx = filtered_dx;
-    x.theta =(LegState_l.theta + LegState_r.theta) / 2.0f - M_PI_2- ins.Pitch ;
+    x.theta =(LegState_l.theta + LegState_r.theta) / 2.0f - M_PI_2- ins.Pitch ;//世界theta=相对车身的角度-车身倾角
+    
     x.dtheta = (legVleft.vPhi + legVright.vPhi) / 2.0f;
+    //hmx--为何不是x.dtheta = (legVleft.vPhi + legVright.vPhi) / 2.0f - ins.Gyro[1];
 
     design.dx = DbusData.ch[1]; //暂时这样
 }
@@ -435,6 +439,7 @@ void robot::errcalc()
 float robot::legharmony()
 {
     float theta_diff = LegState_l.theta - LegState_r.theta;
+    //hmx--kp_harmony系数再大点效果咋样
     float kp_harmony = 0.05f; // 和同步增益类似，但更温和
     float kd_harmony = 0.01f;
 

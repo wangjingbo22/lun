@@ -15,7 +15,7 @@ constexpr float flag_threshold = 5.0f;
  * @note 通过判断虚拟力矩Fy是否小于阈值来判断是否离地，通过信号量通知其他任务
  * @param argument 
  */
-void gound_detect(void* argument);
+void ground_detect(void* argument);
 
 /**
  * @brief 平衡检测任务

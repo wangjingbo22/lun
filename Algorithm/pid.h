@@ -32,12 +32,12 @@ typedef struct _CascadePID
 	float output;
 } CascadePID;
 void PID_Initialize(PID *pid, float p, float i, float d, float maxSum, float maxOut);
-void PID_SingleCalc(PID *pid, float reference, float feedback);
-void PID_CascadeCalc(CascadePID *pid, float angleRef, float angleFdb, float speedFdb);
+void PID_SingleCalc(PID *pid, float reference, float feedback);//单环
+void PID_CascadeCalc(CascadePID *pid, float angleRef, float angleFdb, float speedFdb);//串级
 void PID_Clear(PID *pid);
 void PID_SetMaxOutput(PID *pid, float maxOut);
-void PID_SetDeadzone(PID *pid, float deadzone);
-void PID_SetErrLpfRatio(PID *pid, float ratio);
+void PID_SetDeadzone(PID *pid, float deadzone);//设置死区
+void PID_SetErrLpfRatio(PID *pid, float ratio);//设置误差低通滤波比例
 extern CascadePID legAnglePID, legLengthPID, yawPID, rollPID;
 extern CascadePID l1,l2;
 extern PID test22;
