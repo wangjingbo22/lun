@@ -1,29 +1,33 @@
 #include "robot.hpp"
+#include "Dbus.h"
 #include "lqr.h"
 #include "motor.hpp"
 #include "pid.h"
 #include "portmacro.h"
 #include "vmc.h"
+#include <algorithm>
 #include <math.h>
 #include <stdexcept>
 #include "task.h"
+#include "arm_math.h"
 
 // 轮子半径 (根据你的实际轮子调整, 单位: 米)
 #define WHEEL_RADIUS 0.044f
-
 TaskHandle_t MainHandle;
 
-//u是控制输入，f是腿部作用力
-u u_left,u_right;
-f f_left,f_right;
+// 速度卡尔曼滤波器
+VelocityKF_t velocityKF;
 
-LegTorque uleft,uright;
+// u u_left,u_right;
+// f f_left,f_right;
 
-robostate x,dx,design,err;
+// LegTorque uleft,uright;
 
-LegVelocity legVleft,legVright;
+// robostate x,dx,design,err;
 
-LQR_Dual_K k_;
+// LegVelocity legVleft,legVright;
+
+// LQR_Dual_K k_;
 
 // 腿长PID参数说明: {kp, ki, kd, error, lastError, integral, maxIntegral, output, maxOutput, deadzone, errLpfRatio}
 // 
@@ -38,24 +42,9 @@ LQR_Dual_K k_;
 // 
 // ⚠️ Kd 不要太大！太大会放大噪声导致震荡
 // 建议 Kd / Kp 比例在 0.05~0.2 之间
-PID leglengthleft  = {60.0f, 0.0f, 8.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 6.0f, 0.002f, 0.6f};
-PID leglengthright = {60.0f, 0.0f, 8.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 6.0f, 0.002f, 0.6f};
 
-// Roll补偿: 根据倾斜角度调整左右腿长差异
-// Kp=2: 倾斜1rad(57°) → 补偿力2N (实际倾斜很小，所以这个增益要适中)
-PID Roll = {2.0f, 0.0f, 0.3f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.5f, 0.02f, 0.3f};
 
-// 速度卡尔曼滤波器
-VelocityKF_t velocityKF;
 
-// 定义机器人状态枚举
-enum RobotJumpState {
-    STATE_NORMAL = 0,     // 正常平衡
-    STATE_JUMP_SQUAT,     // 1. 蓄力下蹲 (新增)
-    STATE_JUMP_PUSH,      // 2. 爆发蹬地
-    STATE_AIR_RETRACT,    // 3. 空中缩腿
-    STATE_LANDING_RECOVERY // 4. 着地缓冲 (暂未特殊处理，自动回Normal)
-};
 
 // 当前状态
 static volatile RobotJumpState current_state = STATE_NORMAL;
@@ -84,40 +73,9 @@ void robot::updateState()
     }
     // ===========================
 
-    //更新左右腿位置
-    LegState_l = GetState(motor_[1].angle, motor_[0].angle);
-    LegState_r = GetState(motor_[4].angle, motor_[3].angle);
-    //更新左右腿速度
-    legVleft = GetVelocity(motor_[1].angle, motor_[0].angle, motor_[1].speed, motor_[0].speed);
-    legVright = GetVelocity(motor_[4].angle, motor_[3].angle, motor_[4].speed, motor_[3].speed);
-
-    //更新反馈矩阵K
-
-    k_ = Get_LQR_Dual_K((LegState_l.L+LegState_r.L)/2.0f);
-
-    //================== 卡尔曼滤波融合速度 ==================//
-    // 1. 获取编码器速度 (轮子角速度 * 轮子半径 = 线速度)
-    //float encoder_velocity = (motor_[2].speed + motor_[5].speed) / 2.0f * WHEEL_RADIUS;
-
-    // 2. 获取IMU加速度 (使用去除重力后的运动加速度, 取X轴前进方向)
-    //    注意: ins.MotionAccel_b 是机体系下的运动加速度
-    //    根据你的坐标系定义选择正确的轴
-    //    X轴加速度, 根据实际调整
     
-    // 3. 卡尔曼滤波更新
-    filtered_dx = VelocityKF_Update(&velocityKF, (motor_[2].speed + motor_[5].speed) / 2.0f * WHEEL_RADIUS, ins.MotionAccel_b[0]);
-    if(fabsf(filtered_dx) < 0.05f) filtered_dx = 0.0f;
-    //=========================================================//
 
-    //更新机器人状态向量x
-    x.phi = ins.Pitch;
-    x.dphi = -ins.Gyro[1];
-    x.x = (motor_[2].angle + motor_[5].angle) / 2.0f * WHEEL_RADIUS;  // 位移也换算为米
-    // 使用卡尔曼滤波后的速度
-    x.dx = filtered_dx;
-    x.theta =(LegState_l.theta + LegState_r.theta) / 2.0f - M_PI_2- ins.Pitch ;
-    x.dtheta = (legVleft.vPhi + legVright.vPhi) / 2.0f;
-
+    
     //更新目标值design
     // 机械中值偏移: 如果车往X正方向(前)跑，说明重心靠前，需要给一个负的Pitch目标让它"后仰"平衡，或者调整偏移量
     // 请根据实际情况调整这个值，范围通常在 -0.1 到 0.1 之间
@@ -134,34 +92,7 @@ void robot::updateState()
     // 注意：根据LQR参数符号，我们需要确保反馈方向正确
     // kw_theta < 0, kw_v > 0, kw_x > 0
     
-    // 1. 角度误差 (Current - Target)
-    // kw_theta < 0. 若 phi > 0 (后仰), u = K*phi < 0 (后向扭矩) -> 机体前倾 -> 恢复.
-    err.phi    =  x.phi - design.phi;
-    err.dphi   =  x.dphi - design.dphi;
 
-    // 2. 位置误差 (Current - Target)
-    // kw_x < 0. 若 x > 0 (前移), 需要 u < 0 (后向扭矩) -> 机体前倾 -> 减速/后退.
-    // u = K * err = K * (x - target).
-    
-    // 启用位置环: 只要不是疯狂失控，都应该尝试回归原点
-    // 之前限制 dx < 0.5 太严了，导致稍微跑快点就失去了回正能力
-    if(fabsf(x.phi) < 0.4f) { 
-        err.x  =   x.x - design.x;
-    } else {
-        err.x  =   0.0f; // 倒地后不积分位置
-    }
-    
-    // 位置误差限幅 (防止过大的恢复力导致震荡)
-    // 0.5m 的误差产生约 0.5 * 12 = 6Nm 的扭矩，足够了
-    if(err.x > 1.0f) err.x = 1.0f;
-    if(err.x < -1.0f) err.x = -1.0f;
-    
-    // 3. 速度误差 (Current - Target)
-    // kw_v > 0. 若 dx > 0 (前跑), 需要 u > 0 (前向扭矩) -> 机体后仰 -> 减速.
-    err.dx     =  x.dx - design.dx;
-    
-    err.theta  =  x.theta;
-    err.dtheta =  x.dtheta;
 
     //计算控制输入u
     // 完整的LQR状态反馈: u = K * err
@@ -204,6 +135,9 @@ void robot::updateState()
 
     f_left.Tp = u_left.Tp;
     f_right.Tp = u_right.Tp;
+
+    update();
+    errcalc();
 
     //接下来是腿长控制，先使用简单的pd控制模拟弹簧阻尼系统
     robot::leglengthcontrol();
@@ -321,14 +255,10 @@ void robot::leglengthcontrol()
     // ============================================================
     // 统一安全限幅 (无论什么模式都必须遵守物理极限)
     // ============================================================
-    float F_MAX = 200.0f; 
-    
-    if (f_left.F > F_MAX) f_left.F = F_MAX;
-    if (f_left.F < 0.0f)  f_left.F = 0.0f; // 防止吸地
 
-    if (f_right.F > F_MAX) f_right.F = F_MAX;
-    if (f_right.F < 0.0f)  f_right.F = 0.0f;
 
+    f_left.F = std::clamp(f_left.F, 0.0f, F_MAX);
+    f_right.F = std::clamp(f_right.F, 0.0f, F_MAX);
 
     //固定模式
     // PID_SingleCalc(&leglengthleft,0.1f,LegState_l.L);
@@ -365,4 +295,151 @@ void robot::leglengthcontrol()
 
 
 
+float* robot::DSP_LQR_Calculation(void)
+{
+    // -----------------------------------------------------------
+    // 1. 准备矩阵数据缓存
+    // -----------------------------------------------------------
+    // K: 2行6列 (输入)
+    // X: 6行1列 (状态)
+    // U: 2行1列 (输出)
+    float32_t K_data[12];
+    float32_t X_data[6];
+    float32_t U_data[2];
+
+    // -----------------------------------------------------------
+    // 2. 填充 K 矩阵 (Row-Major Order)
+    // -----------------------------------------------------------
+    // Row 0: 轮子电机反馈增益 (Wheel Motor Gains)
+    K_data[0] = k_.kw_theta;
+    K_data[1] = k_.kw_gyro;
+    K_data[2] = k_.kw_x;
+    K_data[3] = k_.kw_v;
+    K_data[4] = k_.kw_phi;
+    K_data[5] = k_.kw_phi_v;
+
+    // Row 1: 髋关节反馈增益 (Hip/Body Gains)
+    K_data[6] = k_.kh_theta;
+    K_data[7] = k_.kh_gyro;
+    K_data[8] = k_.kh_x;
+    K_data[9] = k_.kh_v;
+    K_data[10] = k_.kh_phi;
+    K_data[11] = k_.kh_phi_v;
+
+    // -----------------------------------------------------------
+    // 3. 填充状态向量 X (顺序必须与 K 的列定义一致)
+    // -----------------------------------------------------------
+    // 基于 robot.cpp 逻辑的映射:
+    // Col 0 (Theta Coeff) -> err.theta (摆杆/腿角度)
+    // Col 1 (Gyro Coeff)  -> err.dtheta(摆杆/腿角速度)
+    // Col 2 (X Coeff)     -> err.x     (位移)
+    // Col 3 (V Coeff)     -> err.dx    (速度)
+    // Col 4 (Phi Coeff)   -> err.phi   (机体倾角)
+    // Col 5 (PhiV Coeff)  -> err.dphi  (机体角速度)
+    
+    // 注意: 这里不包含原始代码中的 pos_boost/vel_boost 等额外增益系数
+    // 仅计算纯粹的 LQR: u = K * x
+    X_data[0] = err.theta;
+    X_data[1] = err.dtheta;
+    X_data[2] = err.x;
+    X_data[3] = err.dx;
+    X_data[4] = err.phi;
+    X_data[5] = err.dphi;
+
+    // -----------------------------------------------------------
+    // 4. 初始化矩阵对象
+    // -----------------------------------------------------------
+    arm_matrix_instance_f32 matK;
+    arm_matrix_instance_f32 matX;
+    arm_matrix_instance_f32 matU;
+
+    // 初始化特定维度的矩阵
+    arm_mat_init_f32(&matK, 2, 6, K_data);
+    arm_mat_init_f32(&matX, 6, 1, X_data);
+    arm_mat_init_f32(&matU, 2, 1, U_data);
+
+    // -----------------------------------------------------------
+    // 5. 执行矩阵乘法: U = K * X
+    // -----------------------------------------------------------
+    // 结果存储在 U_data 中
+    arm_mat_mult_f32(&matK, &matX, &matU);
+
+    // -----------------------------------------------------------
+    // 6. 提取结果
+    // -----------------------------------------------------------
+    // 这里的 T 和 Tp 是纯粹基于 LQR K 矩阵计算得到的
+    float T_matrix  = U_data[0]; 
+    float Tp_matrix = U_data[1];
+
+    return U_data;
+}
+ 
+void robot::update()
+{
+    //更新左右腿位置
+    LegState_l = GetState(motor_[1].angle, motor_[0].angle);
+    LegState_r = GetState(motor_[4].angle, motor_[3].angle);
+    //更新左右腿速度
+    legVleft = GetVelocity(motor_[1].angle, motor_[0].angle, motor_[1].speed, motor_[0].speed);
+    legVright = GetVelocity(motor_[4].angle, motor_[3].angle, motor_[4].speed, motor_[3].speed);
+
+    //更新反馈矩阵K
+
+    k_ = Get_LQR_Dual_K((LegState_l.L+LegState_r.L)/2.0f);
+
+    //================== 卡尔曼滤波融合速度 ==================//
+    // 1. 获取编码器速度 (轮子角速度 * 轮子半径 = 线速度)
+    //float encoder_velocity = (motor_[2].speed + motor_[5].speed) / 2.0f * WHEEL_RADIUS;
+
+    // 2. 获取IMU加速度 (使用去除重力后的运动加速度, 取X轴前进方向)
+    //    注意: ins.MotionAccel_b 是机体系下的运动加速度
+    //    根据你的坐标系定义选择正确的轴
+    //    X轴加速度, 根据实际调整
+    
+    // 3. 卡尔曼滤波更新
+    filtered_dx = VelocityKF_Update(&velocityKF, (motor_[2].speed + motor_[5].speed) / 2.0f * WHEEL_RADIUS, ins.MotionAccel_b[0]);
+    if(fabsf(filtered_dx) < 0.05f) filtered_dx = 0.0f;
+    //=========================================================//
+
+    //更新机器人状态向量x
+    x.phi = ins.Pitch;
+    x.dphi = -ins.Gyro[1];
+    x.x = (motor_[2].angle + motor_[5].angle) / 2.0f * WHEEL_RADIUS;  // 位移也换算为米
+    // 使用卡尔曼滤波后的速度
+    x.dx = filtered_dx;
+    x.theta =(LegState_l.theta + LegState_r.theta) / 2.0f - M_PI_2- ins.Pitch ;
+    x.dtheta = (legVleft.vPhi + legVright.vPhi) / 2.0f;
+
+    design.dx = DbusData.ch[1]; //暂时这样
+}
+
+void robot::errcalc()
+{
+    // 1. 角度误差 (Current - Target)
+    // kw_theta < 0. 若 phi > 0 (后仰), u = K*phi < 0 (后向扭矩) -> 机体前倾 -> 恢复.
+    err.phi    =  x.phi - design.phi;
+    err.dphi   =  x.dphi - design.dphi;
+    
+    if(fabsf(x.phi) < 0.4f) { 
+        err.x  =   x.x - design.x;
+    } else {
+        err.x  =   0.0f; // 倒地后不积分位置
+    }
+    err.x = std::clamp(err.x, -1.0f, 1.0f);
+    
+    err.dx     =  x.dx - design.dx;
+    err.theta  =  x.theta;
+    err.dtheta =  x.dtheta;
+}
+
+float robot::legharmony()
+{
+    float theta_diff = LegState_l.theta - LegState_r.theta;
+    float kp_harmony = 0.05f; // 和同步增益类似，但更温和
+    float kd_harmony = 0.01f;
+
+    float harmony_torque = kp_harmony * theta_diff + kd_harmony * (legVleft.vPhi - legVright.vPhi);
+
+    return harmony_torque;
+}
 

@@ -21,7 +21,7 @@ void gound_detect(void* argument)
 {
     if(!start_flag.load())
         return;
-    float Fy = (f_left.F + f_right.F) / 2.0f;
+    float Fy = (robot::getInstance().f_left.F + robot::getInstance().f_right.F) / 2.0f;
     // 简单的离地/着地状态机逻辑
     // 0: 在地面(初始), 1: 已离地(等待着地)
     static int jump_stage = 0; 
