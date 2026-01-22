@@ -167,11 +167,11 @@ void MX_FREERTOS_Init(void) {
   /* add threads, ... */
   // 增加堆栈大小到 512 words (2KB)，防止 sprintf 和浮点运算导致栈溢出 HardFault
   xTaskCreate(test, "TestTask", 512, NULL, osPriorityNormal, &TestHandle);
-  xTaskCreate(MotorTask, "MotorTask", 512, NULL, osPriorityNormal, &MainHandle);
+  xTaskCreate(MotorTask, "MotorTask", 2048, NULL, osPriorityNormal, &MainHandle);
   xTaskCreate(setmotor, "settest", 256, NULL, osPriorityNormal, NULL);
   //这个任务就是在IMU_QuaternionEKF_Update(BMI088.Gyro[0], BMI088.Gyro[1], BMI088.Gyro[2], BMI088.Accel[0], BMI088.Accel[1], BMI088.Accel[2], dt);
   //的基础上减去了重力加速度的影响，得到纯粹的运动加速度
-  xTaskCreate(INS_Task, "INSTask", 512, NULL, osPriorityNormal, NULL);
+  xTaskCreate(INS_Task, "INSTask", 1024, NULL, osPriorityNormal, NULL);
   xTaskCreate(detect_task, "detect_task", 512, NULL, osPriorityNormal, NULL);
   /* USER CODE END RTOS_THREADS */
 
@@ -352,13 +352,28 @@ void test(void *pvParameters)
     }
     // log_printf("经过VMC计算得出的腿长l:%.4f,角度theta:%.3f",LegState_l.L,LegState_l.theta/(2*3.14159f)*360.0f);
     // log_printf("经过VMC计算得出的腿长l:%.4f,角度theta:%.3f\r\n",LegState_r.L,LegState_r.theta/(2*3.14159f)*360.0f);
-    log_printf("xu书han，111222333，logloglog");
-    //log_printf("Yaw:%.2f,Pitch:%.2f,Roll:%.2f\r\n",INS.Yaw*(57.295779513f),INS.Pitch*(57.295779513f),INS.Roll*(57.295779513f));
-    //log_printf("状态变量x = [theta: %.3f,dtheta: %.3f,x: %.3f,dx :%.3f,phi: %.3f,dphi: %.3f]",x.theta*(57.295779513f),x.dtheta,x.x,x.dx,x.phi,x.dphi);
-
-    // log_printf("t1:%.4f t4=%.4f,Fy_L:%.4f\r\n",uleft.tau1,uleft.tau4,f_left.F);
-
-    // log_printf("----\r\n");
+    
+    // ============ 科学调参：打印关键数据 ============
+    auto& r = robot::getInstance();
+    
+    // 1. 状态量 (确认符号和数值范围)
+    log_printf("phi:%.3f dphi:%.2f | dx:%.3f\r\n", 
+               r.x.phi * 57.3f,   // 机体角度(度)
+               r.x.dphi,          // 机体角速度
+               r.x.dx);           // 速度
+    
+    // 2. LQR输出 (确认数值是否合理)
+    log_printf("T:%.3f Tp:%.3f\r\n", 
+               r.u_left.T,        // 轮子力矩
+               r.u_left.Tp);      // 髋关节力矩
+    
+    // 3. 腿状态 (确认同步)
+    log_printf("thL:%.1f thR:%.1f | L:%.3f\r\n",
+               LegState_l.theta * 57.3f,  // 左腿角度(度)
+               LegState_r.theta * 57.3f,  // 右腿角度(度)
+               LegState_l.L);             // 腿长
+    
+    log_printf("----\r\n");
     
     osDelay(200); // 5Hz 刷新
   }
@@ -378,7 +393,7 @@ void MotorTask(void* argument)
         motor::update();
         motor::Motorsend(motor::tx);
         //这样已经能得到左右腿的腿长和角度了
-        robot::getInstance().updateState();
+        robot::getInstance().control();
         // 调试：在 MotorTask 中打印第一个电机的数据，验证 update 是否生效
         // 既然开启了浮点打印支持，直接用 %f 即可
         // log_printf("MT: ID:0x%X A:%.2f\r\n", motor_[2].id, motor_[2].angle);

@@ -121,14 +121,17 @@ matlabFunction(B_final, 'File', 'get_B_matrix', ...
 
 %% 4. LQR 循环计算
 % -----------------------------------------------------------
-L0_list = 0.08 : 0.01 : 0.14; 
+L0_list = 0.08 : 0.005 : 0.14;  % 更密的采样点用于拟合
 
 % Q 和 R 设置
 Q = diag([300, 5, 10, 1, 150, 1]); 
 R = diag([1.5, 1.5]);
 
-fprintf('\n计算完成。以下是针对不同腿长 L0 的 LQR 增益矩阵 (Row 1)。\n');
-fprintf('将这些值填入你的控制器: T_wheel = -K * State\n');
+% 存储所有 K 值用于拟合
+K_wheel_all = zeros(length(L0_list), 6);
+K_leg_all = zeros(length(L0_list), 6);
+
+fprintf('\n计算完成。以下是针对不同腿长 L0 的 LQR 增益矩阵。\n');
 fprintf('----------------------------------------------------------------------------------------\n');
 fprintf('L0(cm) |  K_theta   K_d_theta      K_x      K_d_x      K_phi    K_d_phi\n');
 fprintf('----------------------------------------------------------------------------------------\n');
@@ -152,10 +155,168 @@ for i = 1:length(L0_list)
     % LQR
     [K, ~, ~] = lqr(A_num, B_num, Q, R);
     
-    % 提取轮子反馈增益
-    K_wheel = K(1, :);
+    % 存储轮子和腿部反馈增益
+    K_wheel_all(i, :) = K(1, :);
+    K_leg_all(i, :) = K(2, :);
     
     fprintf(' %4.1f  | %9.3f %9.3f %9.3f %9.3f %9.3f %9.3f\n', ...
-        L_total*100, K_wheel(1), K_wheel(2), K_wheel(3), K_wheel(4), K_wheel(5), K_wheel(6));
+        L_total*100, K(1,1), K(1,2), K(1,3), K(1,4), K(1,5), K(1,6));
 end
 fprintf('----------------------------------------------------------------------------------------\n');
+
+%% 5. 三次多项式拟合
+% -----------------------------------------------------------
+fprintf('\n正在进行三次多项式拟合...\n');
+
+% 拟合阶数
+poly_order = 3;
+
+% 存储拟合系数 (每行对应一个状态分量的系数 [a3, a2, a1, a0])
+% K(L0) = a3*L0^3 + a2*L0^2 + a1*L0 + a0
+coeff_wheel = zeros(6, poly_order + 1);
+coeff_leg = zeros(6, poly_order + 1);
+
+state_names = {'theta', 'd_theta', 'x', 'd_x', 'phi', 'd_phi'};
+
+% 对每个状态分量进行拟合
+for j = 1:6
+    coeff_wheel(j, :) = polyfit(L0_list, K_wheel_all(:, j)', poly_order);
+    coeff_leg(j, :) = polyfit(L0_list, K_leg_all(:, j)', poly_order);
+end
+
+%% 6. 验证拟合精度
+% -----------------------------------------------------------
+fprintf('\n======================== 拟合精度验证 ========================\n');
+
+% 计算拟合误差
+max_err_wheel = zeros(1, 6);
+max_err_leg = zeros(1, 6);
+
+for j = 1:6
+    K_fit_wheel = polyval(coeff_wheel(j,:), L0_list);
+    K_fit_leg = polyval(coeff_leg(j,:), L0_list);
+    max_err_wheel(j) = max(abs(K_fit_wheel - K_wheel_all(:,j)'));
+    max_err_leg(j) = max(abs(K_fit_leg - K_leg_all(:,j)'));
+end
+
+fprintf('轮子控制增益最大拟合误差:\n');
+for j = 1:6
+    fprintf('  %-8s: %.6f\n', state_names{j}, max_err_wheel(j));
+end
+
+fprintf('\n腿部控制增益最大拟合误差:\n');
+for j = 1:6
+    fprintf('  %-8s: %.6f\n', state_names{j}, max_err_leg(j));
+end
+
+%% 7. 生成 C 代码 (与 lqr.c 格式一致)
+% -----------------------------------------------------------
+fprintf('\n======================== C代码 (可直接复制到 lqr.c) ========================\n\n');
+
+% C代码注释名称
+c_names_wheel = {'Wheel_Theta', 'Wheel_Gyro', 'Wheel_X', 'Wheel_V', 'Wheel_Phi', 'Wheel_PhiV'};
+c_names_hip = {'Hip_Theta', 'Hip_Gyro', 'Hip_X', 'Hip_V', 'Hip_Phi', 'Hip_PhiV'};
+
+fprintf('// 12个状态增益，每个有4个多项式系数 (a*L^3 + b*L^2 + c*L + d)\n');
+fprintf('// 顺序: \n');
+fprintf('// 0-5: 轮子电机 [theta, d_theta, x, d_x, phi, d_phi]\n');
+fprintf('// 6-11: 髋关节 [theta, d_theta, x, d_x, phi, d_phi]\n');
+fprintf('const float LQR_DUAL_COEFFS[12][4] = {\n');
+
+% 轮子控制增益 (0-5)
+for j = 1:6
+    fprintf('    {%10.4f, %10.4f, %10.4f, %10.4f}, // %s\n', ...
+        coeff_wheel(j,1), coeff_wheel(j,2), coeff_wheel(j,3), coeff_wheel(j,4), c_names_wheel{j});
+end
+
+% 髋关节控制增益 (6-11)
+for j = 1:6
+    if j < 6
+        fprintf('    {%10.4f, %10.4f, %10.4f, %10.4f}, // %s\n', ...
+            coeff_leg(j,1), coeff_leg(j,2), coeff_leg(j,3), coeff_leg(j,4), c_names_hip{j});
+    else
+        fprintf('    {%10.4f, %10.4f, %10.4f, %10.4f}, // %s\n', ...
+            coeff_leg(j,1), coeff_leg(j,2), coeff_leg(j,3), coeff_leg(j,4), c_names_hip{j});
+    end
+end
+fprintf('};\n');
+
+%% 8. 输出到 matlabFunction (参照 lunlun.m)
+% -----------------------------------------------------------
+fprintf('\n正在生成 LQR_K 函数文件...\n');
+
+% 构造符号K矩阵 (2x6)
+K_sym = sym('K', [2, 6]);
+syms L0;
+
+for x = 1:2
+    for y = 1:6
+        if x == 1
+            p = coeff_wheel(y, :);
+        else
+            p = coeff_leg(y, :);
+        end
+        K_sym(x, y) = p(1)*L0^3 + p(2)*L0^2 + p(3)*L0 + p(4);
+    end
+end
+
+% 输出到m函数
+matlabFunction(K_sym, 'File', 'LQR_K');
+fprintf('已生成 LQR_K.m 文件\n');
+
+% 打印示例：代入 L0=0.1 验证
+fprintf('\n======================== 验证: L0=0.1m 时的K矩阵 ========================\n');
+K_test = double(subs(K_sym, L0, 0.1));
+fprintf('K_wheel = [%8.4f, %8.4f, %8.4f, %8.4f, %8.4f, %8.4f]\n', K_test(1,:));
+fprintf('K_hip   = [%8.4f, %8.4f, %8.4f, %8.4f, %8.4f, %8.4f]\n', K_test(2,:));
+
+%% 9. 绘制拟合曲线
+% -----------------------------------------------------------
+figure('Name', 'LQR增益拟合结果', 'Position', [100, 100, 1200, 800]);
+
+L0_fine = linspace(min(L0_list), max(L0_list), 100);
+
+for j = 1:6
+    subplot(2, 3, j);
+    
+    % 原始数据点
+    plot(L0_list*100, K_wheel_all(:,j), 'bo', 'MarkerSize', 6, 'DisplayName', '计算值');
+    hold on;
+    
+    % 拟合曲线
+    K_fit = polyval(coeff_wheel(j,:), L0_fine);
+    plot(L0_fine*100, K_fit, 'r-', 'LineWidth', 1.5, 'DisplayName', '三次拟合');
+    
+    xlabel('L0 (cm)');
+    ylabel(['K\_', state_names{j}]);
+    title(['轮子增益 K\_', state_names{j}]);
+    legend('Location', 'best');
+    grid on;
+end
+
+sgtitle('轮子控制增益三次多项式拟合');
+
+% 髋关节增益图
+figure('Name', 'LQR髋关节增益拟合结果', 'Position', [150, 150, 1200, 800]);
+
+for j = 1:6
+    subplot(2, 3, j);
+    
+    % 原始数据点
+    plot(L0_list*100, K_leg_all(:,j), 'go', 'MarkerSize', 6, 'DisplayName', '计算值');
+    hold on;
+    
+    % 拟合曲线
+    K_fit = polyval(coeff_leg(j,:), L0_fine);
+    plot(L0_fine*100, K_fit, 'm-', 'LineWidth', 1.5, 'DisplayName', '三次拟合');
+    
+    xlabel('L0 (cm)');
+    ylabel(['K\_', state_names{j}]);
+    title(['髋关节增益 K\_', state_names{j}]);
+    legend('Location', 'best');
+    grid on;
+end
+
+sgtitle('髋关节控制增益三次多项式拟合');
+
+fprintf('\nLQR模型函数生成完毕!\n');

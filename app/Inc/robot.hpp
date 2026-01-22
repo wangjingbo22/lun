@@ -16,7 +16,7 @@
 
 
 // #define M_PI_2 1.57079632679489661923f
-constexpr float F_MAX = 200.0f;
+constexpr float F_MAX = 15.0f;  // HT4315: 2电机×0.65Nm / 0.1m ≈ 13N (留余量取15N)
 
 extern TaskHandle_t MainHandle;
 
@@ -65,7 +65,7 @@ enum RobotJumpState {
 // extern PID Roll;
 
 // // 速度卡尔曼滤波器
-// extern VelocityKF_t velocityKF;
+ extern VelocityKF_t velocityKF;
 
 class robot
 {
@@ -93,17 +93,22 @@ LegVelocity legVleft,legVright;
 
 LQR_Dual_K k_;
 
-PID leglengthleft  = {60.0f, 0.0f, 8.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 6.0f, 0.002f, 0.6f};
-PID leglengthright = {60.0f, 0.0f, 8.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 6.0f, 0.002f, 0.6f};
+// PID leglengthleft  = {60.0f, 0.0f, 8.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 6.0f, 0.002f, 0.6f};
+// PID leglengthright = {60.0f, 0.0f, 8.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 6.0f, 0.002f, 0.6f};
 
-// Roll补偿: 根据倾斜角度调整左右腿长差异
-// Kp=2: 倾斜1rad(57°) → 补偿力2N (实际倾斜很小，所以这个增益要适中)
-PID Roll = {2.0f, 0.0f, 0.3f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.5f, 0.02f, 0.3f};
+// // Roll补偿: 根据倾斜角度调整左右腿长差异
+// // Kp=2: 倾斜1rad(57°) → 补偿力2N (实际倾斜很小，所以这个增益要适中)
+// PID Roll = {2.0f, 0.0f, 0.3f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.5f, 0.02f, 0.3f};
 
 // 速度卡尔曼滤波器
-VelocityKF_t velocityKF;
+
 //==================================成员函数================================//
 
+/**
+ * @brief pitch超过一定角度力设为0
+ * 
+ */
+void forsafe();
 
 /**
  * @brief 控制腿长，使用简单的PD控制模拟弹簧阻尼系统
@@ -122,13 +127,19 @@ void update();
 
 void errcalc();
 
+void extracted();
+
+void control();
+
 /**
  * @brief 使用DSP库进行矩阵运算，根据当前误差 err 和增益 k_ 计算 T 和 Tp
  *        函数结果存储在静态变量中，可用于调试或替换原有的标量结算
  */
-float* DSP_LQR_Calculation(void);
+void DSP_LQR_Calculation(void);
 
 float legharmony();
+
+void setTorque();
 
 //==================================单例模式函数================================//
 inline static robot& getInstance()
